@@ -21,6 +21,9 @@ python .\roblox_recovery.py
 Use the button in the upper-right corner of the app to switch between dark and
 light mode. Your choice is saved with the other local settings.
 
+The app credits its creator at the bottom of the window, with a link to
+[mycripze's GitHub profile](https://github.com/mycripze).
+
 Use **Browse** beside the Roblox Player shortcut field to select its `.lnk` or
 `.exe` file if it is not found automatically.
 
@@ -61,16 +64,32 @@ intentionally closing Roblox.
 
 The live elapsed-time stopwatch starts with each monitoring run. When monitoring
 stops, the app records a separate session containing the date, start time, end
-time, and elapsed time. Session data is saved locally in
-`%LOCALAPPDATA%\RobloxRecoveryMonitor\monitoring_sessions.json` and displayed
-above the relaunch history. Use the session log's **Save location** field or
-**Browse** button to choose a different JSON file, and **Clear sessions** to
-remove entries from all time, the last hour, 24 hours, 7 days, or 30 days.
+time, and elapsed time. By default, session data is saved in
+`%LOCALAPPDATA%\RobloxRecoveryMonitor\Logs\Monitoring Sessions\monitoring_sessions.json`
+and displayed above the relaunch history. Use the session log's **Save
+location** field or **Browse** button to choose a different JSON file, and
+**Clear sessions** to remove entries from all time, the last hour, 24 hours, 7
+days, or 30 days.
 
 History entries show the full reason text and wrap to fit the resized window.
-Use **Browse** or edit **Save location** to choose the history JSON file. Use
-**Clear history** to remove entries from all time, the last hour, 24 hours, 7
-days, or 30 days.
+By default, the history file is
+`%LOCALAPPDATA%\RobloxRecoveryMonitor\Logs\Relaunch History\history.json`.
+Use **Browse** or edit **Save location** to choose another history JSON file.
+Use **Clear history** to remove entries from all time, the last hour, 24 hours,
+7 days, or 30 days.
+
+## Backups and presets
+
+Click **Create backup** in the top bar and choose where to save a ZIP archive.
+The dialog defaults to `%LOCALAPPDATA%\RobloxRecoveryMonitor\Backups`. The
+archive contains settings, saved mouse actions, presets, and copies of both
+current logs, even if a log uses a custom location.
+
+Use the **Presets** controls under monitoring settings to save, select, apply,
+or delete named settings profiles. Presets include the Roblox shortcut, theme,
+recorder hotkey, replay speed, open timeout, and post-open wait. They do not
+change either log location or the recorded mouse actions. Stop monitoring
+before applying a preset.
 
 A successful entry means Roblox was detected, remained open through the
 configured wait, and the saved mouse path, clicks, and scrolls were sent. It

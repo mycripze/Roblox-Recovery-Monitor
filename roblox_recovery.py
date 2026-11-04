@@ -5,11 +5,13 @@ import queue
 import threading
 import time
 import tkinter as tk
+import webbrowser
+import zipfile
 from collections.abc import Callable
 from ctypes import wintypes
 from datetime import datetime, timedelta
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
 
 if os.name != "nt":
@@ -448,10 +450,32 @@ class RobloxRecoveryApp:
         self.root.geometry("1100x900")
         self.root.minsize(900, 800)
         self.folder = app_data_dir()
+        self.logs_folder = self.folder / "Logs"
+        self.history_folder = self.logs_folder / "Relaunch History"
+        self.sessions_folder = self.logs_folder / "Monitoring Sessions"
+        self.backups_folder = self.folder / "Backups"
+        self.history_folder.mkdir(parents=True, exist_ok=True)
+        self.sessions_folder.mkdir(parents=True, exist_ok=True)
+        self.backups_folder.mkdir(parents=True, exist_ok=True)
         self.settings_path = self.folder / "settings.json"
         self.macro_path = self.folder / "actions.json"
-        self.history_path = self.folder / "history.json"
-        self.monitoring_sessions_path = self.folder / "monitoring_sessions.json"
+        self.presets_path = self.folder / "presets.json"
+        self.legacy_history_path = self.folder / "history.json"
+        self.legacy_sessions_path = self.folder / "monitoring_sessions.json"
+        self.history_path = self.history_folder / "history.json"
+        self.monitoring_sessions_path = (
+            self.sessions_folder / "monitoring_sessions.json"
+        )
+        self.history_log_migrated = self._migrate_default_log_file(
+            self.legacy_history_path, self.history_path
+        )
+        self.sessions_log_migrated = self._migrate_default_log_file(
+            self.legacy_sessions_path, self.monitoring_sessions_path
+        )
+        if not self.history_log_migrated:
+            self.history_path = self.legacy_history_path
+        if not self.sessions_log_migrated:
+            self.monitoring_sessions_path = self.legacy_sessions_path
         self.messages: queue.Queue[tuple[str, object]] = queue.Queue()
         self.stop_event: threading.Event | None = None
         self.worker: threading.Thread | None = None
@@ -468,6 +492,7 @@ class RobloxRecoveryApp:
         self.replay_speed_text = tk.StringVar(value=f"{DEFAULT_REPLAY_SPEED:.2f}x")
         self.open_timeout_text = tk.StringVar(value=str(OPEN_TIMEOUT_SECONDS))
         self.post_open_wait_text = tk.StringVar(value=str(REQUIRED_OPEN_SECONDS))
+        self.preset_choice = tk.StringVar()
         self.monitor_setting_entries: list[ttk.Entry] = []
         self.hotkey_modifiers = {"ctrl", "shift"}
         self.hotkey_key = "r"
@@ -477,6 +502,8 @@ class RobloxRecoveryApp:
         self.record_status = tk.StringVar(value="No action recording")
         self.macro: list[dict] = []
         self.history: list[dict] = []
+        self.presets: dict[str, dict] = {}
+        self._load_presets()
         self._settings_save_after: str | None = None
         self.recorder = MouseRecorder(self._update_record_label, self._recording_error)
         self._hotkey_down = False
@@ -499,6 +526,315 @@ class RobloxRecoveryApp:
         self.root.protocol("WM_DELETE_WINDOW", self._close)
         self.root.after(100, self._process_messages)
         self.root.after(50, self._poll_hotkey)
+
+    @staticmethod
+    def _same_path(first: str | Path, second: Path) -> bool:
+        first_path = Path(os.path.expandvars(str(first))).expanduser()
+        return os.path.normcase(os.path.abspath(first_path)) == os.path.normcase(
+            os.path.abspath(second)
+        )
+
+    def _migrate_default_log_file(self, source: Path, destination: Path) -> bool:
+        if not source.exists():
+            return True
+        try:
+            if not destination.exists():
+                source.replace(destination)
+                return True
+            source_data = json.loads(source.read_text(encoding="utf-8"))
+            destination_data = json.loads(destination.read_text(encoding="utf-8"))
+            if not isinstance(source_data, list) or not isinstance(
+                destination_data, list
+            ):
+                raise ValueError("Both log files must contain JSON lists.")
+            merged = list(destination_data)
+            known_entries = {
+                json.dumps(entry, sort_keys=True, ensure_ascii=False)
+                for entry in merged
+            }
+            for entry in source_data:
+                encoded = json.dumps(entry, sort_keys=True, ensure_ascii=False)
+                if encoded not in known_entries:
+                    merged.append(entry)
+                    known_entries.add(encoded)
+            write_json(destination, merged)
+        except (OSError, json.JSONDecodeError, ValueError) as error:
+            messagebox.showwarning(
+                APP_NAME,
+                f"Could not move the old log file:\n{source}\n\n"
+                f"It will remain in its current location.\n\n{error}",
+            )
+            return False
+        try:
+            source.unlink()
+        except OSError as error:
+            messagebox.showwarning(
+                APP_NAME,
+                f"The old log was copied into:\n{destination}\n\n"
+                f"but the original could not be removed:\n{source}\n\n{error}",
+            )
+        return True
+
+    def _load_presets(self) -> None:
+        if not self.presets_path.exists():
+            return
+        try:
+            data = json.loads(self.presets_path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                raise ValueError("The presets file must contain a JSON object.")
+            invalid_names = []
+            for name, preset in data.items():
+                if not isinstance(name, str) or not name.strip():
+                    invalid_names.append(str(name))
+                    continue
+                try:
+                    self.presets[name] = self._validate_preset(preset)
+                except ValueError:
+                    invalid_names.append(name)
+            if invalid_names:
+                messagebox.showwarning(
+                    APP_NAME,
+                    "These invalid presets were skipped:\n"
+                    + "\n".join(invalid_names),
+                )
+        except (OSError, json.JSONDecodeError, ValueError) as error:
+            messagebox.showwarning(
+                APP_NAME,
+                f"Presets could not be loaded from:\n{self.presets_path}\n\n{error}",
+            )
+
+    def _validate_preset(self, preset: object) -> dict:
+        if not isinstance(preset, dict):
+            raise ValueError("A preset must be a JSON object.")
+        shortcut = preset.get("shortcut")
+        theme = preset.get("theme")
+        speed = preset.get("replay_speed")
+        timeout = preset.get("open_timeout_seconds")
+        wait = preset.get("post_open_wait_seconds")
+        hotkey = preset.get("record_hotkey")
+        if not isinstance(shortcut, str):
+            raise ValueError("A preset contains an invalid Roblox shortcut.")
+        if theme not in ("dark", "light"):
+            raise ValueError("A preset contains an invalid theme.")
+        if (
+            not isinstance(speed, (int, float))
+            or isinstance(speed, bool)
+            or not MIN_REPLAY_SPEED <= speed <= MAX_REPLAY_SPEED
+        ):
+            raise ValueError("A preset contains an invalid replay speed.")
+        try:
+            timeout_value = int(timeout)
+            wait_value = int(wait)
+        except (TypeError, ValueError):
+            raise ValueError("A preset contains invalid timing values.") from None
+        if str(timeout_value) != str(timeout) or not (
+            MIN_OPEN_TIMEOUT_SECONDS <= timeout_value <= MAX_OPEN_TIMEOUT_SECONDS
+        ):
+            raise ValueError("A preset contains an invalid open timeout.")
+        if str(wait_value) != str(wait) or not (
+            MIN_POST_OPEN_WAIT_SECONDS
+            <= wait_value
+            <= MAX_POST_OPEN_WAIT_SECONDS
+        ):
+            raise ValueError("A preset contains an invalid post-open wait.")
+        if not isinstance(hotkey, dict):
+            raise ValueError("A preset contains an invalid recorder shortcut.")
+        modifiers = hotkey.get("modifiers")
+        key = hotkey.get("key")
+        if (
+            not isinstance(modifiers, list)
+            or not modifiers
+            or any(item not in ("ctrl", "shift", "alt") for item in modifiers)
+            or len(set(modifiers)) != len(modifiers)
+            or not isinstance(key, str)
+            or self._key_virtual_code(key.casefold()) is None
+        ):
+            raise ValueError("A preset contains an invalid recorder shortcut.")
+        return {
+            "shortcut": shortcut,
+            "theme": theme,
+            "replay_speed": float(speed),
+            "open_timeout_seconds": str(timeout_value),
+            "post_open_wait_seconds": str(wait_value),
+            "record_hotkey": {
+                "modifiers": list(modifiers),
+                "key": key.casefold(),
+            },
+        }
+
+    def _save_presets(self) -> bool:
+        try:
+            write_json(self.presets_path, self.presets)
+        except OSError as error:
+            messagebox.showerror(
+                APP_NAME,
+                f"Could not save presets to:\n{self.presets_path}\n\n{error}",
+            )
+            return False
+        return True
+
+    def _refresh_preset_choices(self, selected: str = "") -> None:
+        choices = sorted(self.presets)
+        self.preset_combo.configure(values=choices)
+        self.preset_choice.set(selected if selected in self.presets else "")
+
+    def _save_current_preset(self) -> None:
+        if self.worker and self.worker.is_alive():
+            messagebox.showwarning(
+                APP_NAME, "Stop monitoring before saving or applying a preset."
+            )
+            return
+        name = simpledialog.askstring(
+            "Save preset", "Enter a name for the current settings:", parent=self.root
+        )
+        if name is None:
+            return
+        name = name.strip()
+        if not name:
+            messagebox.showwarning(APP_NAME, "Enter a name for the preset.")
+            return
+        if name in self.presets and not messagebox.askyesno(
+            APP_NAME, f"Replace the existing preset '{name}'?"
+        ):
+            return
+        settings = self._settings_data()
+        profile = {
+            key: settings[key]
+            for key in (
+                "shortcut",
+                "theme",
+                "replay_speed",
+                "open_timeout_seconds",
+                "post_open_wait_seconds",
+                "record_hotkey",
+            )
+        }
+        previous = self.presets.get(name)
+        self.presets[name] = profile
+        if self._save_presets():
+            self._refresh_preset_choices(name)
+        elif previous is None:
+            del self.presets[name]
+        else:
+            self.presets[name] = previous
+
+    def _apply_selected_preset(self) -> None:
+        if self.worker and self.worker.is_alive():
+            messagebox.showwarning(
+                APP_NAME, "Stop monitoring before applying a preset."
+            )
+            return
+        if self.recorder.recording:
+            messagebox.showwarning(
+                APP_NAME, "Stop recording actions before applying a preset."
+            )
+            return
+        name = self.preset_choice.get()
+        profile = self.presets.get(name)
+        if profile is None:
+            messagebox.showwarning(APP_NAME, "Select a saved preset first.")
+            return
+        try:
+            settings = self._validate_preset(profile)
+        except ValueError as error:
+            messagebox.showerror(APP_NAME, f"The selected preset is invalid:\n\n{error}")
+            return
+        self.shortcut.set(settings["shortcut"])
+        self.theme = settings["theme"]
+        self.replay_speed.set(settings["replay_speed"])
+        self.replay_speed_text.set(f"{settings['replay_speed']:.2f}x")
+        self.open_timeout_text.set(settings["open_timeout_seconds"])
+        self.post_open_wait_text.set(settings["post_open_wait_seconds"])
+        self.hotkey_modifiers = set(settings["record_hotkey"]["modifiers"])
+        self.hotkey_key = settings["record_hotkey"]["key"]
+        self._show_hotkey_in_entry()
+        self._update_record_label()
+        self._configure_theme()
+        self._save_settings()
+
+    def _delete_selected_preset(self) -> None:
+        name = self.preset_choice.get()
+        if name not in self.presets:
+            messagebox.showwarning(APP_NAME, "Select a saved preset first.")
+            return
+        if not messagebox.askyesno(APP_NAME, f"Delete the preset '{name}'?"):
+            return
+        removed = self.presets.pop(name)
+        if self._save_presets():
+            self._refresh_preset_choices()
+        else:
+            self.presets[name] = removed
+            self._refresh_preset_choices(name)
+
+    def _create_backup(self) -> None:
+        if not self._apply_history_path() or not self._apply_monitoring_sessions_path():
+            return
+        suggested_name = (
+            f"Roblox Recovery Monitor backup "
+            f"{datetime.now():%Y-%m-%d %H-%M-%S}.zip"
+        )
+        selected = filedialog.asksaveasfilename(
+            title="Save Roblox Recovery Monitor backup",
+            initialdir=str(self.backups_folder),
+            initialfile=suggested_name,
+            defaultextension=".zip",
+            filetypes=[("ZIP backup", "*.zip"), ("All files", "*.*")],
+        )
+        if not selected:
+            return
+        destination = Path(selected)
+        temporary = destination.with_suffix(destination.suffix + ".tmp")
+        files = {
+            "settings.json": json.dumps(
+                self._settings_data(), indent=2, ensure_ascii=False
+            ),
+            "actions.json": json.dumps(self.macro, indent=2, ensure_ascii=False),
+            "presets.json": json.dumps(self.presets, indent=2, ensure_ascii=False),
+            "logs/relaunch_history.json": json.dumps(
+                self.history, indent=2, ensure_ascii=False
+            ),
+            "logs/monitoring_sessions.json": json.dumps(
+                self.monitoring_sessions, indent=2, ensure_ascii=False
+            ),
+        }
+        manifest = {
+            "created_at": datetime.now().astimezone().isoformat(timespec="seconds"),
+            "source_paths": {
+                "settings.json": str(self.settings_path),
+                "actions.json": str(self.macro_path),
+                "presets.json": str(self.presets_path),
+                "logs/relaunch_history.json": str(self.history_path),
+                "logs/monitoring_sessions.json": str(
+                    self.monitoring_sessions_path
+                ),
+            },
+        }
+        try:
+            with zipfile.ZipFile(
+                temporary, "w", compression=zipfile.ZIP_DEFLATED
+            ) as archive:
+                for archive_name, content in files.items():
+                    archive.writestr(archive_name, content)
+                archive.writestr(
+                    "backup_manifest.json",
+                    json.dumps(manifest, indent=2, ensure_ascii=False),
+                )
+            os.replace(temporary, destination)
+        except (OSError, zipfile.BadZipFile) as error:
+            cleanup_error = None
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError as cleanup:
+                cleanup_error = cleanup
+            detail = str(error)
+            if cleanup_error:
+                detail += f"\nCould not remove temporary file {temporary}:\n{cleanup_error}"
+            messagebox.showerror(
+                APP_NAME,
+                f"Could not create the backup at:\n{destination}\n\n{detail}",
+            )
+            return
+        messagebox.showinfo(APP_NAME, f"Backup created:\n{destination}")
 
     def _configure_theme(self) -> None:
         palettes = {
@@ -589,6 +925,12 @@ class RobloxRecoveryApp:
             background=self.colors["background"],
             foreground=self.colors["foreground"],
             font=("Segoe UI Semibold", 20),
+        )
+        style.configure(
+            "Link.TLabel",
+            background=self.colors["background"],
+            foreground=self.colors["accent"],
+            font=("Segoe UI", 9, "underline"),
         )
         style.configure(
             "Section.TLabel",
@@ -712,7 +1054,7 @@ class RobloxRecoveryApp:
                 self.log.tag_configure(tag, foreground=color)
 
     def _build_ui(self) -> None:
-        outer = ttk.Frame(self.root, padding=(24, 20))
+        outer = ttk.Frame(self.root, padding=(24, 20, 24, 44))
         outer.pack(fill="both", expand=True)
 
         header = ttk.Frame(outer)
@@ -722,6 +1064,10 @@ class RobloxRecoveryApp:
         ttk.Label(title_row, text=APP_NAME, style="Title.TLabel").pack(
             side="left", anchor="w"
         )
+        self.backup_button = ttk.Button(
+            title_row, text="Create backup", command=self._create_backup
+        )
+        self.backup_button.pack(side="right", padx=(0, 8))
         self.theme_button = ttk.Button(
             title_row, command=self._toggle_theme
         )
@@ -736,7 +1082,7 @@ class RobloxRecoveryApp:
         launcher_frame = ttk.Frame(outer, style="Card.TFrame", padding=14)
         launcher_frame.pack(fill="x", pady=(0, 10))
         ttk.Label(
-            launcher_frame, text="Roblox Player shortcut", style="Section.TLabel"
+            launcher_frame, text="Roblox Player Shortcut", style="Section.TLabel"
         ).pack(anchor="w", pady=(0, 9))
         launcher_row = ttk.Frame(launcher_frame, style="Card.TFrame")
         launcher_row.pack(fill="x")
@@ -784,7 +1130,7 @@ class RobloxRecoveryApp:
         settings_frame = ttk.Frame(outer, style="Card.TFrame", padding=14)
         settings_frame.pack(fill="x", pady=(0, 10))
         ttk.Label(
-            settings_frame, text="Replay and monitoring settings", style="Section.TLabel"
+            settings_frame, text="Replay and Monitoring Settings", style="Section.TLabel"
         ).pack(anchor="w", pady=(0, 10))
 
         speed_row = ttk.Frame(settings_frame, style="Card.TFrame")
@@ -862,6 +1208,38 @@ class RobloxRecoveryApp:
         ).pack(side="left")
         self._show_hotkey_in_entry()
 
+        preset_row = ttk.Frame(settings_frame, style="Card.TFrame")
+        preset_row.pack(fill="x", pady=(12, 0))
+        ttk.Label(preset_row, text="Presets", style="Card.TLabel").pack(
+            side="left", padx=(0, 12)
+        )
+        self.preset_combo = ttk.Combobox(
+            preset_row,
+            textvariable=self.preset_choice,
+            values=sorted(self.presets),
+            state="readonly",
+            width=24,
+        )
+        self.preset_combo.pack(side="left", padx=(0, 8))
+        self.save_preset_button = ttk.Button(
+            preset_row, text="Save current as...", command=self._save_current_preset
+        )
+        self.save_preset_button.pack(side="left", padx=(0, 8))
+        self.apply_preset_button = ttk.Button(
+            preset_row, text="Apply", command=self._apply_selected_preset
+        )
+        self.apply_preset_button.pack(side="left", padx=(0, 8))
+        self.delete_preset_button = ttk.Button(
+            preset_row, text="Delete", command=self._delete_selected_preset
+        )
+        self.delete_preset_button.pack(side="left")
+        self.preset_controls = [
+            self.preset_combo,
+            self.save_preset_button,
+            self.apply_preset_button,
+            self.delete_preset_button,
+        ]
+
         sessions_frame = ttk.Frame(outer, style="Card.TFrame", padding=14)
         sessions_frame.pack(fill="x", pady=(0, 10))
         sessions_header = ttk.Frame(sessions_frame, style="Card.TFrame")
@@ -928,7 +1306,7 @@ class RobloxRecoveryApp:
         history_header = ttk.Frame(history_frame, style="Card.TFrame")
         history_header.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 10))
         ttk.Label(
-            history_header, text="Relaunch history", style="Section.TLabel"
+            history_header, text="Relaunch History", style="Section.TLabel"
         ).pack(side="left")
         ttk.Button(
             history_header, text="Clear history", command=self._open_clear_history_dialog
@@ -993,6 +1371,33 @@ class RobloxRecoveryApp:
         history_frame.bind("<Configure>", self._layout_history_body)
         history_frame.after_idle(self._layout_history_body)
         self._render_history()
+
+        footer = ttk.Frame(self.root)
+        footer.place(relx=1, rely=1, anchor="se", x=-24, y=-10)
+        self.creator_link = ttk.Label(
+            footer,
+            text="@mycripze on GitHub",
+            style="Link.TLabel",
+            cursor="hand2",
+        )
+        self.creator_link.pack(side="right")
+        self.creator_link.bind("<Button-1>", self._open_creator_profile)
+        ttk.Label(footer, text="Created by", style="Muted.TLabel").pack(
+            side="right", padx=(0, 5)
+        )
+
+    def _open_creator_profile(self, _event=None) -> None:
+        try:
+            opened = webbrowser.open("https://github.com/mycripze")
+        except OSError as error:
+            messagebox.showerror(
+                APP_NAME, f"Could not open the creator's GitHub profile.\n\n{error}"
+            )
+            return
+        if not opened:
+            messagebox.showerror(
+                APP_NAME, "Could not open the creator's GitHub profile."
+            )
 
     def _add_seconds_input(
         self,
@@ -1183,9 +1588,21 @@ class RobloxRecoveryApp:
                 self.replay_speed.set(float(saved_speed))
             saved_history_path = settings.get("history_path")
             if isinstance(saved_history_path, str) and saved_history_path.strip():
+                if self._same_path(saved_history_path, self.legacy_history_path):
+                    saved_history_path = str(
+                        self.history_path
+                        if self.history_log_migrated
+                        else self.legacy_history_path
+                    )
                 self.history_path_var.set(saved_history_path)
             saved_sessions_path = settings.get("monitoring_sessions_path")
             if isinstance(saved_sessions_path, str) and saved_sessions_path.strip():
+                if self._same_path(saved_sessions_path, self.legacy_sessions_path):
+                    saved_sessions_path = str(
+                        self.monitoring_sessions_path
+                        if self.sessions_log_migrated
+                        else self.legacy_sessions_path
+                    )
                 self.monitoring_sessions_path_var.set(saved_sessions_path)
             timeout = settings.get("open_timeout_seconds", OPEN_TIMEOUT_SECONDS)
             if isinstance(timeout, str) and timeout.isdecimal():
@@ -1268,7 +1685,7 @@ class RobloxRecoveryApp:
 
     def _browse_shortcut(self) -> None:
         selected = filedialog.askopenfilename(
-            title="Choose the official Roblox Player shortcut",
+            title="Choose the official Roblox Player Shortcut",
             filetypes=[
                 ("Windows shortcuts and applications", "*.lnk *.exe"),
                 ("All files", "*.*"),
@@ -1357,33 +1774,33 @@ class RobloxRecoveryApp:
         self._save_settings()
         return "break" if _event else True
 
+    def _settings_data(self) -> dict:
+        return {
+            "shortcut": self.shortcut.get().strip(),
+            "theme": self.theme,
+            "replay_speed": float(self.replay_speed.get()),
+            "history_path": self.history_path_var.get().strip(),
+            "monitoring_sessions_path": (
+                self.monitoring_sessions_path_var.get().strip()
+            ),
+            "open_timeout_seconds": self.open_timeout_text.get().strip(),
+            "post_open_wait_seconds": self.post_open_wait_text.get().strip(),
+            "record_hotkey": {
+                "modifiers": [
+                    name
+                    for name in ("ctrl", "shift", "alt")
+                    if name in self.hotkey_modifiers
+                ],
+                "key": self.hotkey_key,
+            },
+        }
+
     def _save_settings(self) -> None:
         if self._settings_save_after is not None:
             self.root.after_cancel(self._settings_save_after)
         self._settings_save_after = None
         try:
-            write_json(
-                self.settings_path,
-                {
-                    "shortcut": self.shortcut.get().strip(),
-                    "theme": self.theme,
-                    "replay_speed": float(self.replay_speed.get()),
-                    "history_path": self.history_path_var.get().strip(),
-                    "monitoring_sessions_path": (
-                        self.monitoring_sessions_path_var.get().strip()
-                    ),
-                    "open_timeout_seconds": self.open_timeout_text.get().strip(),
-                    "post_open_wait_seconds": self.post_open_wait_text.get().strip(),
-                    "record_hotkey": {
-                        "modifiers": [
-                            name
-                            for name in ("ctrl", "shift", "alt")
-                            if name in self.hotkey_modifiers
-                        ],
-                        "key": self.hotkey_key,
-                    },
-                },
-            )
+            write_json(self.settings_path, self._settings_data())
         except OSError as error:
             messagebox.showerror(
                 APP_NAME, f"Could not save settings:\n{self.settings_path}\n\n{error}"
@@ -1586,6 +2003,8 @@ class RobloxRecoveryApp:
         self.sessions_path_entry.configure(state="disabled")
         self.sessions_browse_button.configure(state="disabled")
         self.clear_sessions_button.configure(state="disabled")
+        for control in self.preset_controls:
+            control.configure(state="disabled")
         self.status.set("Starting monitor...")
 
     def _stop_monitoring(self) -> None:
@@ -1910,6 +2329,8 @@ class RobloxRecoveryApp:
                 self.sessions_path_entry.configure(state="normal")
                 self.sessions_browse_button.configure(state="normal")
                 self.clear_sessions_button.configure(state="normal")
+                for control in self.preset_controls:
+                    control.configure(state="normal")
             elif kind == "error":
                 messagebox.showerror(APP_NAME, str(data))
             elif kind == "recording_error":
