@@ -5,6 +5,7 @@ import queue
 import threading
 import time
 import tkinter as tk
+from collections.abc import Callable
 from ctypes import wintypes
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -460,6 +461,9 @@ class RobloxRecoveryApp:
         self.stopwatch_after: str | None = None
         self.shortcut = tk.StringVar(value=find_default_shortcut())
         self.history_path_var = tk.StringVar(value=str(self.history_path))
+        self.monitoring_sessions_path_var = tk.StringVar(
+            value=str(self.monitoring_sessions_path)
+        )
         self.replay_speed = tk.DoubleVar(value=DEFAULT_REPLAY_SPEED)
         self.replay_speed_text = tk.StringVar(value=f"{DEFAULT_REPLAY_SPEED:.2f}x")
         self.open_timeout_text = tk.StringVar(value=str(OPEN_TIMEOUT_SECONDS))
@@ -482,6 +486,9 @@ class RobloxRecoveryApp:
         self._load_settings()
         self.history_path = Path(
             os.path.expandvars(self.history_path_var.get().strip())
+        ).expanduser()
+        self.monitoring_sessions_path = Path(
+            os.path.expandvars(self.monitoring_sessions_path_var.get().strip())
         ).expanduser()
         self._load_macro()
         self._build_ui()
@@ -811,6 +818,29 @@ class RobloxRecoveryApp:
             text="A record is added when monitoring stops.",
             style="CardMuted.TLabel",
         ).pack(side="left", padx=(10, 0))
+        self.clear_sessions_button = ttk.Button(
+            sessions_header,
+            text="Clear sessions",
+            command=self._open_clear_sessions_dialog,
+        )
+        self.clear_sessions_button.pack(side="right")
+        sessions_location = ttk.Frame(sessions_frame, style="Card.TFrame")
+        sessions_location.pack(fill="x", pady=(0, 8))
+        ttk.Label(
+            sessions_location, text="Save location", style="CardMuted.TLabel"
+        ).pack(side="left", padx=(0, 10))
+        self.sessions_path_entry = ttk.Entry(
+            sessions_location, textvariable=self.monitoring_sessions_path_var
+        )
+        self.sessions_path_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        self.sessions_path_entry.bind("<Return>", self._apply_monitoring_sessions_path)
+        self.sessions_path_entry.bind("<FocusOut>", self._apply_monitoring_sessions_path)
+        self.sessions_browse_button = ttk.Button(
+            sessions_location,
+            text="Browse",
+            command=self._browse_monitoring_sessions_path,
+        )
+        self.sessions_browse_button.pack(side="left")
         session_columns = ("date", "started", "ended", "elapsed")
         self.sessions_table = ttk.Treeview(
             sessions_frame,
@@ -1090,6 +1120,9 @@ class RobloxRecoveryApp:
             saved_history_path = settings.get("history_path")
             if isinstance(saved_history_path, str) and saved_history_path.strip():
                 self.history_path_var.set(saved_history_path)
+            saved_sessions_path = settings.get("monitoring_sessions_path")
+            if isinstance(saved_sessions_path, str) and saved_sessions_path.strip():
+                self.monitoring_sessions_path_var.set(saved_sessions_path)
             timeout = settings.get("open_timeout_seconds", OPEN_TIMEOUT_SECONDS)
             if isinstance(timeout, str) and timeout.isdecimal():
                 timeout = int(timeout)
@@ -1194,6 +1227,22 @@ class RobloxRecoveryApp:
             self.history_path_var.set(selected)
             self._apply_history_path()
 
+    def _browse_monitoring_sessions_path(self) -> None:
+        current_path = Path(
+            self.monitoring_sessions_path_var.get().strip()
+            or self.monitoring_sessions_path
+        )
+        selected = filedialog.asksaveasfilename(
+            title="Choose monitoring sessions file",
+            initialdir=str(current_path.parent),
+            initialfile=current_path.name,
+            defaultextension=".json",
+            filetypes=[("JSON sessions", "*.json"), ("All files", "*.*")],
+        )
+        if selected:
+            self.monitoring_sessions_path_var.set(selected)
+            self._apply_monitoring_sessions_path()
+
     def _apply_history_path(self, _event=None):
         raw_path = self.history_path_var.get().strip()
         try:
@@ -1216,6 +1265,34 @@ class RobloxRecoveryApp:
         self._save_settings()
         return "break" if _event else True
 
+    def _apply_monitoring_sessions_path(self, _event=None):
+        raw_path = self.monitoring_sessions_path_var.get().strip()
+        try:
+            if not raw_path:
+                raise ValueError("Choose a file path for monitoring sessions.")
+            selected = Path(os.path.expandvars(raw_path)).expanduser()
+            if selected.exists() and selected.is_dir():
+                raise ValueError("The sessions location must be a file, not a folder.")
+            if not selected.parent.is_dir():
+                raise ValueError(
+                    "The parent folder for the sessions file does not exist."
+                )
+        except (OSError, ValueError) as error:
+            messagebox.showerror(
+                APP_NAME, f"Invalid monitoring sessions file location:\n\n{error}"
+            )
+            self.monitoring_sessions_path_var.set(
+                str(self.monitoring_sessions_path)
+            )
+            return "break" if _event else False
+        if selected != self.monitoring_sessions_path:
+            self.monitoring_sessions_path = selected
+            self.monitoring_sessions = []
+            self._load_monitoring_sessions()
+            self._render_monitoring_sessions()
+        self._save_settings()
+        return "break" if _event else True
+
     def _save_settings(self) -> None:
         if self._settings_save_after is not None:
             self.root.after_cancel(self._settings_save_after)
@@ -1227,6 +1304,9 @@ class RobloxRecoveryApp:
                     "shortcut": self.shortcut.get().strip(),
                     "replay_speed": float(self.replay_speed.get()),
                     "history_path": self.history_path_var.get().strip(),
+                    "monitoring_sessions_path": (
+                        self.monitoring_sessions_path_var.get().strip()
+                    ),
                     "open_timeout_seconds": self.open_timeout_text.get().strip(),
                     "post_open_wait_seconds": self.post_open_wait_text.get().strip(),
                     "record_hotkey": {
@@ -1397,10 +1477,18 @@ class RobloxRecoveryApp:
             return
         if not self._apply_history_path():
             return
+        if not self._apply_monitoring_sessions_path():
+            return
         if not self.history_path.parent.is_dir():
             messagebox.showerror(
                 APP_NAME,
                 "The parent folder for the relaunch history file does not exist.",
+            )
+            return
+        if not self.monitoring_sessions_path.parent.is_dir():
+            messagebox.showerror(
+                APP_NAME,
+                "The parent folder for the monitoring sessions file does not exist.",
             )
             return
         self._save_settings()
@@ -1430,6 +1518,9 @@ class RobloxRecoveryApp:
         self.replay_speed_scale.configure(state="disabled")
         for entry in self.monitor_setting_entries:
             entry.configure(state="disabled")
+        self.sessions_path_entry.configure(state="disabled")
+        self.sessions_browse_button.configure(state="disabled")
+        self.clear_sessions_button.configure(state="disabled")
         self.status.set("Starting monitor...")
 
     def _stop_monitoring(self) -> None:
@@ -1751,6 +1842,9 @@ class RobloxRecoveryApp:
                 self.replay_speed_scale.configure(state="normal")
                 for entry in self.monitor_setting_entries:
                     entry.configure(state="normal")
+                self.sessions_path_entry.configure(state="normal")
+                self.sessions_browse_button.configure(state="normal")
+                self.clear_sessions_button.configure(state="normal")
             elif kind == "error":
                 messagebox.showerror(APP_NAME, str(data))
             elif kind == "recording_error":
@@ -1931,8 +2025,22 @@ class RobloxRecoveryApp:
         return parsed
 
     def _open_clear_history_dialog(self) -> None:
+        self._open_clear_log_dialog(
+            "Relaunch history", self._confirm_clear_history
+        )
+
+    def _open_clear_sessions_dialog(self) -> None:
+        self._open_clear_log_dialog(
+            "Monitoring Sessions", self._confirm_clear_monitoring_sessions
+        )
+
+    def _open_clear_log_dialog(
+        self,
+        log_name: str,
+        confirm_command: Callable[[tk.Toplevel, str], None],
+    ) -> None:
         dialog = tk.Toplevel(self.root)
-        dialog.title("Clear relaunch history")
+        dialog.title(f"Clear {log_name}")
         dialog.transient(self.root)
         dialog.resizable(False, False)
         dialog.configure(background=self.colors["background"])
@@ -1961,7 +2069,7 @@ class RobloxRecoveryApp:
             actions,
             text="Continue",
             style="Primary.TButton",
-            command=lambda: self._confirm_clear_history(dialog, selection.get()),
+            command=lambda: confirm_command(dialog, selection.get()),
         ).pack(side="right", padx=(0, 8))
         dialog.update_idletasks()
         dialog.geometry(
@@ -1969,6 +2077,39 @@ class RobloxRecoveryApp:
         )
 
     def _confirm_clear_history(self, dialog: tk.Toplevel, period: str) -> None:
+        self._confirm_clear_log(
+            dialog,
+            period,
+            "Relaunch history",
+            self.history,
+            self.history_path,
+            self._history_entry_datetime,
+            self._replace_history,
+        )
+
+    def _confirm_clear_monitoring_sessions(
+        self, dialog: tk.Toplevel, period: str
+    ) -> None:
+        self._confirm_clear_log(
+            dialog,
+            period,
+            "Monitoring Sessions",
+            self.monitoring_sessions,
+            self.monitoring_sessions_path,
+            self._monitoring_session_datetime,
+            self._replace_monitoring_sessions,
+        )
+
+    def _confirm_clear_log(
+        self,
+        dialog: tk.Toplevel,
+        period: str,
+        log_name: str,
+        entries: list[dict],
+        path: Path,
+        datetime_getter: Callable[[dict], datetime | None],
+        replace_entries: Callable[[list[dict]], None],
+    ) -> None:
         dialog.destroy()
         period_names = {
             "all": "all time",
@@ -1979,7 +2120,7 @@ class RobloxRecoveryApp:
         }
         if not messagebox.askyesno(
             APP_NAME,
-            f"Delete relaunch history from {period_names[period]}?",
+            f"Delete {log_name} from {period_names[period]}?",
             icon="warning",
         ):
             return
@@ -1994,29 +2135,56 @@ class RobloxRecoveryApp:
         else:
             cutoff = datetime.now() - durations[period]
             remaining = []
-            for entry in self.history:
-                entry_time = self._history_entry_datetime(entry)
+            for entry in entries:
+                entry_time = datetime_getter(entry)
                 if entry_time is None or entry_time < cutoff:
                     remaining.append(entry)
-        removed_count = len(self.history) - len(remaining)
+        removed_count = len(entries) - len(remaining)
         if not removed_count:
-            messagebox.showinfo(APP_NAME, "There are no matching history entries.")
+            messagebox.showinfo(APP_NAME, f"There are no matching {log_name} entries.")
             return
         try:
-            write_json(self.history_path, remaining)
+            write_json(path, remaining)
         except OSError as error:
             messagebox.showerror(
                 APP_NAME,
-                f"History could not be cleared from:\n{self.history_path}\n\n{error}",
+                f"{log_name} could not be cleared from:\n{path}\n\n{error}",
             )
             return
-        self.history = remaining
-        self._render_history()
+        replace_entries(remaining)
         messagebox.showinfo(
             APP_NAME,
-            f"Deleted {removed_count} relaunch history "
+            f"Deleted {removed_count} {log_name} "
             f"{'entry' if removed_count == 1 else 'entries'}.",
         )
+
+    def _replace_history(self, entries: list[dict]) -> None:
+        self.history = entries
+        self._render_history()
+
+    def _replace_monitoring_sessions(self, entries: list[dict]) -> None:
+        self.monitoring_sessions = entries
+        self._render_monitoring_sessions()
+
+    @staticmethod
+    def _monitoring_session_datetime(entry: dict) -> datetime | None:
+        started_at = entry.get("started_at")
+        if isinstance(started_at, str):
+            try:
+                parsed = datetime.fromisoformat(started_at)
+            except ValueError:
+                parsed = None
+            else:
+                if parsed.tzinfo is not None:
+                    return parsed.astimezone().replace(tzinfo=None)
+                return parsed
+        try:
+            return datetime.strptime(
+                f"{entry.get('date', '')} {entry.get('time_started', '')}",
+                "%Y/%m/%d %H:%M:%S",
+            )
+        except (TypeError, ValueError):
+            return None
 
     def _close(self) -> None:
         if self.recorder.recording:
