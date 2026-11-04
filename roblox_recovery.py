@@ -481,9 +481,10 @@ class RobloxRecoveryApp:
         self.recorder = MouseRecorder(self._update_record_label, self._recording_error)
         self._hotkey_down = False
         self._last_hotkey_time = 0.0
+        self.theme = "dark"
 
-        self._configure_dark_theme()
         self._load_settings()
+        self._configure_theme()
         self.history_path = Path(
             os.path.expandvars(self.history_path_var.get().strip())
         ).expanduser()
@@ -499,20 +500,38 @@ class RobloxRecoveryApp:
         self.root.after(100, self._process_messages)
         self.root.after(50, self._poll_hotkey)
 
-    def _configure_dark_theme(self) -> None:
-        self.colors = {
-            "background": "#111318",
-            "surface": "#191d24",
-            "field": "#101319",
-            "foreground": "#e8edf5",
-            "muted": "#9ba6b7",
-            "border": "#2b323e",
-            "hover": "#252c38",
-            "selected": "#204b78",
-            "green": "#56d39b",
-            "red": "#ff7785",
-            "accent": "#69a7ff",
+    def _configure_theme(self) -> None:
+        palettes = {
+            "dark": {
+                "background": "#111318",
+                "surface": "#191d24",
+                "field": "#101319",
+                "foreground": "#e8edf5",
+                "muted": "#9ba6b7",
+                "border": "#2b323e",
+                "hover": "#252c38",
+                "selected": "#204b78",
+                "green": "#56d39b",
+                "red": "#ff7785",
+                "accent": "#69a7ff",
+                "accent_foreground": "#0f1722",
+            },
+            "light": {
+                "background": "#f4f6fa",
+                "surface": "#ffffff",
+                "field": "#f8fafc",
+                "foreground": "#1f2937",
+                "muted": "#667085",
+                "border": "#d0d5dd",
+                "hover": "#eef2f6",
+                "selected": "#cfe3ff",
+                "green": "#16834a",
+                "red": "#c0394b",
+                "accent": "#2f6feb",
+                "accent_foreground": "#ffffff",
+            },
         }
+        self.colors = palettes[self.theme]
         self.root.configure(background=self.colors["background"])
         style = ttk.Style(self.root)
         style.theme_use("clam")
@@ -600,7 +619,7 @@ class RobloxRecoveryApp:
         style.configure(
             "Primary.TButton",
             background=self.colors["accent"],
-            foreground="#0f1722",
+            foreground=self.colors["accent_foreground"],
             bordercolor=self.colors["accent"],
         )
         style.map(
@@ -663,6 +682,34 @@ class RobloxRecoveryApp:
             bordercolor=self.colors["border"],
             arrowcolor=self.colors["foreground"],
         )
+        if hasattr(self, "theme_button"):
+            self.theme_button.configure(
+                text=f"Switch to {'light' if self.theme == 'dark' else 'dark'} mode"
+            )
+        if hasattr(self, "replay_speed_scale"):
+            self.replay_speed_scale.configure(
+                background=self.colors["background"],
+                foreground=self.colors["foreground"],
+                troughcolor=self.colors["field"],
+                activebackground=self.colors["accent"],
+                highlightbackground=self.colors["background"],
+                highlightcolor=self.colors["accent"],
+            )
+        if hasattr(self, "log"):
+            self.log.configure(
+                background=self.colors["field"],
+                foreground=self.colors["foreground"],
+                insertbackground=self.colors["foreground"],
+                selectbackground=self.colors["selected"],
+            )
+            for tag, color in (
+                ("SUCCESSFUL", self.colors["green"]),
+                ("FAILED", self.colors["red"]),
+                ("META", self.colors["foreground"]),
+                ("REASON", self.colors["muted"]),
+                ("EMPTY", self.colors["muted"]),
+            ):
+                self.log.tag_configure(tag, foreground=color)
 
     def _build_ui(self) -> None:
         outer = ttk.Frame(self.root, padding=(24, 20))
@@ -670,7 +717,16 @@ class RobloxRecoveryApp:
 
         header = ttk.Frame(outer)
         header.pack(fill="x", pady=(0, 16))
-        ttk.Label(header, text=APP_NAME, style="Title.TLabel").pack(anchor="w")
+        title_row = ttk.Frame(header)
+        title_row.pack(fill="x")
+        ttk.Label(title_row, text=APP_NAME, style="Title.TLabel").pack(
+            side="left", anchor="w"
+        )
+        self.theme_button = ttk.Button(
+            title_row, command=self._toggle_theme
+        )
+        self.theme_button.pack(side="right")
+        self._configure_theme()
         ttk.Label(
             header,
             text="Monitor Roblox, replay your saved actions, and review relaunches.",
@@ -1102,11 +1158,19 @@ class RobloxRecoveryApp:
             )
         return seconds
 
+    def _toggle_theme(self) -> None:
+        self.theme = "light" if self.theme == "dark" else "dark"
+        self._configure_theme()
+        self._save_settings()
+
     def _load_settings(self) -> None:
         if not self.settings_path.exists():
             return
         try:
             settings = json.loads(self.settings_path.read_text(encoding="utf-8"))
+            saved_theme = settings.get("theme")
+            if saved_theme in ("dark", "light"):
+                self.theme = saved_theme
             saved_path = settings.get("shortcut", "")
             if saved_path:
                 self.shortcut.set(saved_path)
@@ -1302,6 +1366,7 @@ class RobloxRecoveryApp:
                 self.settings_path,
                 {
                     "shortcut": self.shortcut.get().strip(),
+                    "theme": self.theme,
                     "replay_speed": float(self.replay_speed.get()),
                     "history_path": self.history_path_var.get().strip(),
                     "monitoring_sessions_path": (

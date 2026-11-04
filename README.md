@@ -18,6 +18,9 @@ Double-click `Run Roblox Recovery Monitor.bat`, or run:
 python .\roblox_recovery.py
 ```
 
+Use the button in the upper-right corner of the app to switch between dark and
+light mode. Your choice is saved with the other local settings.
+
 Use **Browse** beside the Roblox Player shortcut field to select its `.lnk` or
 `.exe` file if it is not found automatically.
 
