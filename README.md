@@ -18,6 +18,10 @@ Double-click `Run Roblox Recovery Monitor.bat`, or run:
 python .\roblox_recovery.py
 ```
 
+**Run the monitor as administrator** to record mouse movement, clicks, and
+scrolls in Roblox. Right-click the app or launcher and choose **Run as
+administrator**. Roblox and the monitor should run at the same privilege level.
+
 Use the button in the upper-right corner of the app to switch between dark and
 light mode. Your choice is saved with the other local settings.
 
@@ -40,15 +44,16 @@ Use **Browse** beside the Roblox Player shortcut field to select its `.lnk` or
 To change the recorder shortcut, click its box and press a combination
 containing Ctrl, Shift, or Alt and a supported key. Mouse movement, clicks, and
 vertical scrolls are recorded only while Roblox is the foreground app. Keyboard
-input is not recorded. Positions are relative to the Roblox window, so they
-adapt to its size. The sequence is positional and does not verify which
+input is not recorded. The recorder shortcut is global and can be used while
+Roblox is in the foreground. Positions are relative to the Roblox window, so
+they adapt to its size. The sequence is positional and does not verify which
 experience is selected. The recording is saved locally in
 `%LOCALAPPDATA%\RobloxRecoveryMonitor\actions.json`.
 
 The pointer follows the recorded path and timing instead of jumping to each
-click. Use the **Mouse glide speed** slider to scale delays: `1.00x` is recorded
-pace, values above it are faster, and values below it are slower. The range is
-`0.25x` to `50.00x`.
+click. Mouse movement now replays at the timing it was recorded, without a
+speed multiplier. Every captured movement point is retained, and replay uses a
+shared timeline so processing overhead does not accumulate between points.
 
 ## Monitoring settings and history
 
@@ -87,9 +92,9 @@ current logs, even if a log uses a custom location.
 
 Use the **Presets** controls under monitoring settings to save, select, apply,
 or delete named settings profiles. Presets include the Roblox shortcut, theme,
-recorder hotkey, replay speed, open timeout, and post-open wait. They do not
-change either log location or the recorded mouse actions. Stop monitoring
-before applying a preset.
+recorder hotkey, open timeout, and post-open wait. They do not change either
+log location or the recorded mouse actions. Stop monitoring before applying a
+preset.
 
 A successful entry means Roblox was detected, remained open through the
 configured wait, and the saved mouse path, clicks, and scrolls were sent. It

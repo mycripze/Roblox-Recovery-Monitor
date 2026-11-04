@@ -29,12 +29,7 @@ MAX_ATTEMPTS = 3
 OPEN_TIMEOUT_SECONDS = 60
 REQUIRED_OPEN_SECONDS = 5
 KEY_HOLD_SECONDS = 0.05
-MOUSE_MOVE_SAMPLE_SECONDS = 0.02
-MOUSE_MOVE_SAMPLE_DISTANCE = 2
 MAX_RECORDED_DELAY_SECONDS = 10
-MIN_REPLAY_SPEED = 0.25
-MAX_REPLAY_SPEED = 50.0
-DEFAULT_REPLAY_SPEED = 1.0
 MIN_OPEN_TIMEOUT_SECONDS = 1
 MAX_OPEN_TIMEOUT_SECONDS = 3600
 MIN_POST_OPEN_WAIT_SECONDS = 0
@@ -130,6 +125,8 @@ class PROCESSENTRY32W(ctypes.Structure):
 
 
 user32.GetForegroundWindow.restype = wintypes.HWND
+user32.IsWindow.argtypes = [wintypes.HWND]
+user32.IsWindow.restype = wintypes.BOOL
 user32.SetWindowsHookExW.argtypes = [
     ctypes.c_int,
     HOOKPROC,
@@ -170,6 +167,29 @@ user32.GetSystemMetrics.argtypes = [ctypes.c_int]
 user32.GetSystemMetrics.restype = ctypes.c_int
 user32.GetAsyncKeyState.argtypes = [ctypes.c_int]
 user32.GetAsyncKeyState.restype = ctypes.c_short
+user32.RegisterHotKey.argtypes = [
+    wintypes.HWND,
+    ctypes.c_int,
+    wintypes.UINT,
+    wintypes.UINT,
+]
+user32.RegisterHotKey.restype = wintypes.BOOL
+user32.UnregisterHotKey.argtypes = [wintypes.HWND, ctypes.c_int]
+user32.UnregisterHotKey.restype = wintypes.BOOL
+user32.GetMessageW.argtypes = [
+    ctypes.POINTER(wintypes.MSG),
+    wintypes.HWND,
+    wintypes.UINT,
+    wintypes.UINT,
+]
+user32.GetMessageW.restype = ctypes.c_int
+user32.PostThreadMessageW.argtypes = [
+    wintypes.DWORD,
+    wintypes.UINT,
+    WPARAM,
+    LPARAM,
+]
+user32.PostThreadMessageW.restype = wintypes.BOOL
 user32.GetCursorPos.argtypes = [ctypes.POINTER(POINT)]
 user32.GetCursorPos.restype = wintypes.BOOL
 user32.IsWindowVisible.argtypes = [wintypes.HWND]
@@ -336,26 +356,29 @@ class MouseRecorder:
         self.recording = False
         self._hook = None
         self._hook_proc = HOOKPROC(self._handle_event)
-        self._last_action_time = 0.0
-        self._last_move_time = 0.0
-        self._last_recorded_point: tuple[int, int] | None = None
+        self._last_action_time: float | None = None
         self._foreground_hwnd = 0
         self._foreground_is_roblox = False
+        self._roblox_process_ids: set[int] = set()
+        self._captured_actions = 0
+        self._ignored_foreground_processes: set[str] = set()
         self._lock = threading.Lock()
 
     def start(self) -> None:
         if self.recording:
             return
+        process_ids = roblox_process_ids()
         module = kernel32.GetModuleHandleW(None)
         hook = user32.SetWindowsHookExW(WH_MOUSE_LL, self._hook_proc, module, 0)
         if not hook:
             raise ctypes.WinError()
         self.actions = []
-        self._last_action_time = 0.0
-        self._last_move_time = 0.0
-        self._last_recorded_point = None
+        self._last_action_time = None
         self._foreground_hwnd = 0
         self._foreground_is_roblox = False
+        self._roblox_process_ids = process_ids
+        self._captured_actions = 0
+        self._ignored_foreground_processes.clear()
         self._hook = hook
         self.recording = True
         self.on_change()
@@ -369,6 +392,10 @@ class MouseRecorder:
         self.on_change()
         with self._lock:
             return list(self.actions)
+
+    def ignored_foreground_processes(self) -> list[str]:
+        with self._lock:
+            return sorted(self._ignored_foreground_processes)
 
     def _handle_event(self, code, message, data_pointer):
         if code == HC_ACTION and self.recording:
@@ -386,10 +413,18 @@ class MouseRecorder:
                     hwnd = user32.GetForegroundWindow()
                     if hwnd != self._foreground_hwnd:
                         self._foreground_hwnd = hwnd
+                        foreground_pid = window_process_id(hwnd)
+                        if foreground_pid not in self._roblox_process_ids:
+                            self._roblox_process_ids = roblox_process_ids()
                         self._foreground_is_roblox = (
-                            process_image_name(window_process_id(hwnd)).casefold()
-                            == PROCESS_NAME.casefold()
+                            foreground_pid in self._roblox_process_ids
                         )
+                        if not self._foreground_is_roblox:
+                            process_name = (
+                                process_image_name(foreground_pid) or "Unknown process"
+                            )
+                            with self._lock:
+                                self._ignored_foreground_processes.add(process_name)
                     if self._foreground_is_roblox:
                         rect = client_screen_rect(hwnd)
                         if rect:
@@ -398,21 +433,10 @@ class MouseRecorder:
                             y = (details.pt.y - top) / height
                             if 0 <= x <= 1 and 0 <= y <= 1:
                                 now = time.monotonic()
-                                point = (details.pt.x, details.pt.y)
-                                if is_move and self._last_recorded_point is not None:
-                                    moved_x = point[0] - self._last_recorded_point[0]
-                                    moved_y = point[1] - self._last_recorded_point[1]
-                                    if (
-                                        moved_x * moved_x + moved_y * moved_y
-                                        < MOUSE_MOVE_SAMPLE_DISTANCE**2
-                                        and now - self._last_move_time
-                                        < MOUSE_MOVE_SAMPLE_SECONDS
-                                    ):
-                                        return user32.CallNextHookEx(
-                                            self._hook, code, message, data_pointer
-                                        )
                                 delay = min(
-                                    max(now - self._last_action_time, 0.0),
+                                    max(now - self._last_action_time, 0.0)
+                                    if self._last_action_time is not None
+                                    else 0.0,
                                     MAX_RECORDED_DELAY_SECONDS,
                                 )
                                 action = {
@@ -425,7 +449,7 @@ class MouseRecorder:
                                     ),
                                     "x": round(x, 6),
                                     "y": round(y, 6),
-                                    "delay": round(delay, 3),
+                                    "delay": round(delay, 4),
                                 }
                                 if button:
                                     action["button"] = button
@@ -435,12 +459,91 @@ class MouseRecorder:
                                 with self._lock:
                                     self.actions.append(action)
                                     self._last_action_time = now
-                                    self._last_recorded_point = point
-                                    if is_move:
-                                        self._last_move_time = now
+                                    self._captured_actions += 1
                 except (OSError, ValueError) as error:
                     self.on_error(error)
         return user32.CallNextHookEx(self._hook, code, message, data_pointer)
+
+
+class GlobalHotkeyListener:
+    HOTKEY_ID = 1
+    WM_HOTKEY = 0x0312
+    WM_QUIT = 0x0012
+    MOD_ALT = 0x0001
+    MOD_CONTROL = 0x0002
+    MOD_SHIFT = 0x0004
+    MOD_NOREPEAT = 0x4000
+
+    def __init__(
+        self,
+        modifiers: set[str],
+        key: str,
+        on_hotkey: Callable[[], None],
+        on_error: Callable[[OSError], None],
+    ):
+        self.modifiers = modifiers
+        self.key = key
+        self.on_hotkey = on_hotkey
+        self.on_error = on_error
+        self.ready = threading.Event()
+        self.thread_id = 0
+        self.error: OSError | None = None
+        self.thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self) -> None:
+        self.thread.start()
+        if not self.ready.wait(2):
+            raise RuntimeError("The global recorder shortcut could not be initialized.")
+        if self.error:
+            raise self.error
+
+    def stop(self) -> None:
+        if not self.thread.is_alive():
+            return
+        if not user32.PostThreadMessageW(
+            self.thread_id, self.WM_QUIT, 0, 0
+        ):
+            raise ctypes.WinError()
+        self.thread.join(timeout=2)
+        if self.thread.is_alive():
+            raise RuntimeError("The global recorder shortcut did not stop.")
+
+    def _run(self) -> None:
+        self.thread_id = int(kernel32.GetCurrentThreadId())
+        modifier_flags = self.MOD_NOREPEAT
+        if "ctrl" in self.modifiers:
+            modifier_flags |= self.MOD_CONTROL
+        if "shift" in self.modifiers:
+            modifier_flags |= self.MOD_SHIFT
+        if "alt" in self.modifiers:
+            modifier_flags |= self.MOD_ALT
+        key_code = RobloxRecoveryApp._key_virtual_code(self.key)
+        if key_code is None:
+            self.error = OSError(f"Unsupported recorder key: {self.key}")
+            self.ready.set()
+            return
+        if not user32.RegisterHotKey(
+            None, self.HOTKEY_ID, modifier_flags, key_code
+        ):
+            self.error = ctypes.WinError()
+            self.ready.set()
+            return
+        self.ready.set()
+        message = wintypes.MSG()
+        try:
+            while True:
+                result = user32.GetMessageW(ctypes.byref(message), None, 0, 0)
+                if result == 0:
+                    break
+                if result == -1:
+                    self.error = ctypes.WinError()
+                    self.on_error(self.error)
+                    break
+                if message.message == self.WM_HOTKEY:
+                    self.on_hotkey()
+        finally:
+            if not user32.UnregisterHotKey(None, self.HOTKEY_ID):
+                self.on_error(ctypes.WinError())
 
 
 class RobloxRecoveryApp:
@@ -488,8 +591,6 @@ class RobloxRecoveryApp:
         self.monitoring_sessions_path_var = tk.StringVar(
             value=str(self.monitoring_sessions_path)
         )
-        self.replay_speed = tk.DoubleVar(value=DEFAULT_REPLAY_SPEED)
-        self.replay_speed_text = tk.StringVar(value=f"{DEFAULT_REPLAY_SPEED:.2f}x")
         self.open_timeout_text = tk.StringVar(value=str(OPEN_TIMEOUT_SECONDS))
         self.post_open_wait_text = tk.StringVar(value=str(REQUIRED_OPEN_SECONDS))
         self.preset_choice = tk.StringVar()
@@ -506,8 +607,7 @@ class RobloxRecoveryApp:
         self._load_presets()
         self._settings_save_after: str | None = None
         self.recorder = MouseRecorder(self._update_record_label, self._recording_error)
-        self._hotkey_down = False
-        self._last_hotkey_time = 0.0
+        self.global_hotkey: GlobalHotkeyListener | None = None
         self.theme = "dark"
 
         self._load_settings()
@@ -525,7 +625,7 @@ class RobloxRecoveryApp:
         self._load_monitoring_sessions()
         self.root.protocol("WM_DELETE_WINDOW", self._close)
         self.root.after(100, self._process_messages)
-        self.root.after(50, self._poll_hotkey)
+        self._restart_global_hotkey()
 
     @staticmethod
     def _same_path(first: str | Path, second: Path) -> bool:
@@ -608,7 +708,6 @@ class RobloxRecoveryApp:
             raise ValueError("A preset must be a JSON object.")
         shortcut = preset.get("shortcut")
         theme = preset.get("theme")
-        speed = preset.get("replay_speed")
         timeout = preset.get("open_timeout_seconds")
         wait = preset.get("post_open_wait_seconds")
         hotkey = preset.get("record_hotkey")
@@ -616,12 +715,6 @@ class RobloxRecoveryApp:
             raise ValueError("A preset contains an invalid Roblox shortcut.")
         if theme not in ("dark", "light"):
             raise ValueError("A preset contains an invalid theme.")
-        if (
-            not isinstance(speed, (int, float))
-            or isinstance(speed, bool)
-            or not MIN_REPLAY_SPEED <= speed <= MAX_REPLAY_SPEED
-        ):
-            raise ValueError("A preset contains an invalid replay speed.")
         try:
             timeout_value = int(timeout)
             wait_value = int(wait)
@@ -653,7 +746,6 @@ class RobloxRecoveryApp:
         return {
             "shortcut": shortcut,
             "theme": theme,
-            "replay_speed": float(speed),
             "open_timeout_seconds": str(timeout_value),
             "post_open_wait_seconds": str(wait_value),
             "record_hotkey": {
@@ -703,7 +795,6 @@ class RobloxRecoveryApp:
             for key in (
                 "shortcut",
                 "theme",
-                "replay_speed",
                 "open_timeout_seconds",
                 "post_open_wait_seconds",
                 "record_hotkey",
@@ -741,8 +832,6 @@ class RobloxRecoveryApp:
             return
         self.shortcut.set(settings["shortcut"])
         self.theme = settings["theme"]
-        self.replay_speed.set(settings["replay_speed"])
-        self.replay_speed_text.set(f"{settings['replay_speed']:.2f}x")
         self.open_timeout_text.set(settings["open_timeout_seconds"])
         self.post_open_wait_text.set(settings["post_open_wait_seconds"])
         self.hotkey_modifiers = set(settings["record_hotkey"]["modifiers"])
@@ -849,6 +938,7 @@ class RobloxRecoveryApp:
                 "selected": "#204b78",
                 "green": "#56d39b",
                 "red": "#ff7785",
+                "warning": "#ffcc66",
                 "accent": "#69a7ff",
                 "accent_foreground": "#0f1722",
             },
@@ -863,6 +953,7 @@ class RobloxRecoveryApp:
                 "selected": "#cfe3ff",
                 "green": "#16834a",
                 "red": "#c0394b",
+                "warning": "#9a6700",
                 "accent": "#2f6feb",
                 "accent_foreground": "#ffffff",
             },
@@ -913,6 +1004,12 @@ class RobloxRecoveryApp:
             background=self.colors["background"],
             foreground=self.colors["muted"],
             font=("Segoe UI", 9),
+        )
+        style.configure(
+            "Warning.TLabel",
+            background=self.colors["background"],
+            foreground=self.colors["warning"],
+            font=("Segoe UI", 9, "bold"),
         )
         style.configure(
             "CardMuted.TLabel",
@@ -1028,15 +1125,6 @@ class RobloxRecoveryApp:
             self.theme_button.configure(
                 text=f"Switch to {'light' if self.theme == 'dark' else 'dark'} mode"
             )
-        if hasattr(self, "replay_speed_scale"):
-            self.replay_speed_scale.configure(
-                background=self.colors["background"],
-                foreground=self.colors["foreground"],
-                troughcolor=self.colors["field"],
-                activebackground=self.colors["accent"],
-                highlightbackground=self.colors["background"],
-                highlightcolor=self.colors["accent"],
-            )
         if hasattr(self, "log"):
             self.log.configure(
                 background=self.colors["field"],
@@ -1078,6 +1166,11 @@ class RobloxRecoveryApp:
             text="Monitor Roblox, replay your saved actions, and review relaunches.",
             style="Muted.TLabel",
         ).pack(anchor="w", pady=(3, 0))
+        ttk.Label(
+            header,
+            text="Important: Run this app as administrator to record Roblox mouse input.",
+            style="Warning.TLabel",
+        ).pack(anchor="w", pady=(5, 0))
 
         launcher_frame = ttk.Frame(outer, style="Card.TFrame", padding=14)
         launcher_frame.pack(fill="x", pady=(0, 10))
@@ -1133,45 +1226,11 @@ class RobloxRecoveryApp:
             settings_frame, text="Replay and Monitoring Settings", style="Section.TLabel"
         ).pack(anchor="w", pady=(0, 10))
 
-        speed_row = ttk.Frame(settings_frame, style="Card.TFrame")
-        speed_row.pack(fill="x")
-        ttk.Label(speed_row, text="Mouse glide speed", style="Card.TLabel").pack(
-            side="left", padx=(0, 16)
-        )
-        ttk.Label(speed_row, text="Slower", style="CardMuted.TLabel").pack(
-            side="left", padx=(0, 4)
-        )
-        self.replay_speed_scale = tk.Scale(
-            speed_row,
-            from_=MIN_REPLAY_SPEED,
-            to=MAX_REPLAY_SPEED,
-            resolution=0.25,
-            orient="horizontal",
-            showvalue=False,
-            variable=self.replay_speed,
-            command=self._on_replay_speed_change,
-            length=340,
-            highlightthickness=0,
-            background=self.colors["background"],
-            foreground=self.colors["foreground"],
-            troughcolor=self.colors["field"],
-            activebackground=self.colors["accent"],
-            highlightbackground=self.colors["background"],
-            highlightcolor=self.colors["accent"],
-            borderwidth=0,
-            font=("Segoe UI", 9),
-        )
-        self.replay_speed_scale.pack(side="left", fill="x", expand=True)
-        self.replay_speed_text.set(f"{self.replay_speed.get():.2f}x")
-        ttk.Label(speed_row, text="Faster", style="CardMuted.TLabel").pack(
-            side="left", padx=(4, 10)
-        )
         ttk.Label(
-            speed_row, textvariable=self.replay_speed_text, style="Card.TLabel"
-        ).pack(side="left", padx=(0, 8))
-        ttk.Label(speed_row, text="1.00x = recorded pace", style="CardMuted.TLabel").pack(
-            side="left"
-        )
+            settings_frame,
+            text="Mouse movement replays at the timing and path it was recorded.",
+            style="CardMuted.TLabel",
+        ).pack(anchor="w")
 
         timing_row = ttk.Frame(settings_frame, style="Card.TFrame")
         timing_row.pack(fill="x", pady=(10, 0))
@@ -1203,7 +1262,7 @@ class RobloxRecoveryApp:
         self.hotkey_entry.bind("<FocusIn>", self._begin_hotkey_capture)
         ttk.Label(
             hotkey_row,
-            text="Click to set; use Ctrl, Shift, or Alt with a key.",
+            text="Global shortcut; use Ctrl, Shift, or Alt with a key.",
             style="CardMuted.TLabel",
         ).pack(side="left")
         self._show_hotkey_in_entry()
@@ -1496,6 +1555,16 @@ class RobloxRecoveryApp:
     def _begin_hotkey_capture(self, _event=None):
         if self.hotkey_capture:
             return "break"
+        if self.global_hotkey:
+            try:
+                self.global_hotkey.stop()
+            except (OSError, RuntimeError) as error:
+                messagebox.showerror(
+                    APP_NAME,
+                    f"Could not pause the global recorder shortcut.\n\n{error}",
+                )
+                return "break"
+            self.global_hotkey = None
         self.hotkey_capture = True
         self.hotkey_entry.configure(state="normal")
         self.hotkey_entry.delete(0, "end")
@@ -1512,6 +1581,7 @@ class RobloxRecoveryApp:
             self.hotkey_capture = False
             self.root.unbind("<KeyPress>", self._hotkey_binding_id)
             self._show_hotkey_in_entry()
+            self._restart_global_hotkey()
             return "break"
         if key in ("control_l", "control_r", "shift_l", "shift_r", "alt_l", "alt_r"):
             return "break"
@@ -1520,6 +1590,7 @@ class RobloxRecoveryApp:
             self.hotkey_capture = False
             self.root.unbind("<KeyPress>", self._hotkey_binding_id)
             self._show_hotkey_in_entry()
+            self._restart_global_hotkey()
             messagebox.showwarning(
                 APP_NAME,
                 "Choose a shortcut that includes Ctrl, Shift, or Alt to avoid "
@@ -1530,6 +1601,7 @@ class RobloxRecoveryApp:
             self.hotkey_capture = False
             self.root.unbind("<KeyPress>", self._hotkey_binding_id)
             self._show_hotkey_in_entry()
+            self._restart_global_hotkey()
             messagebox.showwarning(APP_NAME, "That key is not supported.")
             return "break"
         self.hotkey_modifiers = modifiers
@@ -1538,6 +1610,7 @@ class RobloxRecoveryApp:
         self.root.unbind("<KeyPress>", self._hotkey_binding_id)
         self._show_hotkey_in_entry()
         self._update_record_label()
+        self._restart_global_hotkey()
         self._save_settings()
         return "break"
 
@@ -1579,13 +1652,6 @@ class RobloxRecoveryApp:
             saved_path = settings.get("shortcut", "")
             if saved_path:
                 self.shortcut.set(saved_path)
-            saved_speed = settings.get("replay_speed", DEFAULT_REPLAY_SPEED)
-            if (
-                isinstance(saved_speed, (int, float))
-                and not isinstance(saved_speed, bool)
-                and MIN_REPLAY_SPEED <= saved_speed <= MAX_REPLAY_SPEED
-            ):
-                self.replay_speed.set(float(saved_speed))
             saved_history_path = settings.get("history_path")
             if isinstance(saved_history_path, str) and saved_history_path.strip():
                 if self._same_path(saved_history_path, self.legacy_history_path):
@@ -1778,7 +1844,6 @@ class RobloxRecoveryApp:
         return {
             "shortcut": self.shortcut.get().strip(),
             "theme": self.theme,
-            "replay_speed": float(self.replay_speed.get()),
             "history_path": self.history_path_var.get().strip(),
             "monitoring_sessions_path": (
                 self.monitoring_sessions_path_var.get().strip()
@@ -1806,15 +1871,6 @@ class RobloxRecoveryApp:
                 APP_NAME, f"Could not save settings:\n{self.settings_path}\n\n{error}"
             )
 
-    def _on_replay_speed_change(self, value: str) -> None:
-        speed = float(value)
-        self.replay_speed_text.set(f"{speed:.2f}x")
-        if self._settings_save_after is not None:
-            self.root.after_cancel(self._settings_save_after)
-        self._settings_save_after = self.root.after(
-            400, self._save_scheduled_settings
-        )
-
     def _save_scheduled_settings(self) -> None:
         self._settings_save_after = None
         self._save_settings()
@@ -1839,10 +1895,21 @@ class RobloxRecoveryApp:
         try:
             actions = self.recorder.stop()
             if not actions:
+                ignored_processes = self.recorder.ignored_foreground_processes()
+                process_detail = (
+                    "\nForeground app(s) observed: "
+                    + ", ".join(ignored_processes[:5])
+                    + "."
+                    if ignored_processes
+                    else ""
+                )
                 messagebox.showwarning(
                     APP_NAME,
-                    "No Roblox mouse actions were recorded. "
-                    "Keep Roblox in the foreground while moving and clicking.",
+                    "No mouse input was captured from Roblox. Make sure a Roblox "
+                    "Player window is open and focused while recording. If Roblox "
+                    "is running as administrator, run this monitor as administrator "
+                    "too."
+                    + process_detail,
                 )
                 return
             if not any(action.get("type") == "move" for action in actions):
@@ -1896,24 +1963,36 @@ class RobloxRecoveryApp:
     def _recording_error(self, error: Exception) -> None:
         self.messages.put(("recording_error", str(error)))
 
-    def _poll_hotkey(self) -> None:
-        pressed_modifiers = self._pressed_hotkey_modifiers()
-        key_code = self._key_virtual_code(self.hotkey_key)
-        key_down = bool(key_code and user32.GetAsyncKeyState(key_code) & 0x8000)
-        combination_down = (
-            pressed_modifiers == self.hotkey_modifiers and key_down
+    def _restart_global_hotkey(self) -> None:
+        if self.global_hotkey:
+            try:
+                self.global_hotkey.stop()
+            except (OSError, RuntimeError) as error:
+                messagebox.showerror(
+                    APP_NAME,
+                    f"Could not stop the previous recorder shortcut.\n\n{error}",
+                )
+                return
+            self.global_hotkey = None
+        listener = GlobalHotkeyListener(
+            self.hotkey_modifiers,
+            self.hotkey_key,
+            lambda: self.messages.put(("hotkey", None)),
+            lambda error: self.messages.put(("hotkey_error", str(error))),
         )
-        now = time.monotonic()
-        if (
-            combination_down
-            and not self._hotkey_down
-            and now - self._last_hotkey_time > 0.5
-            and not self.hotkey_capture
-        ):
-            self._last_hotkey_time = now
-            self._toggle_recording()
-        self._hotkey_down = combination_down
-        self.root.after(50, self._poll_hotkey)
+        try:
+            listener.start()
+        except (OSError, RuntimeError) as error:
+            messagebox.showerror(
+                APP_NAME,
+                f"Could not register the global recorder shortcut "
+                f"{self._hotkey_display()}.\n\n"
+                "Another application may already be using this shortcut. "
+                "Choose a different recorder shortcut and try again.\n\n"
+                f"{error}",
+            )
+            return
+        self.global_hotkey = listener
 
     def _start_monitoring(self) -> None:
         if self.recorder.recording:
@@ -1975,10 +2054,9 @@ class RobloxRecoveryApp:
             return
         self._save_settings()
         self.stop_event = threading.Event()
-        replay_speed = float(self.replay_speed.get())
         self.worker = threading.Thread(
             target=self._monitor_loop,
-            args=(self.stop_event, str(shortcut), replay_speed, open_timeout, post_open_wait),
+            args=(self.stop_event, str(shortcut), open_timeout, post_open_wait),
             daemon=True,
         )
         try:
@@ -1997,7 +2075,6 @@ class RobloxRecoveryApp:
         self.start_button.configure(state="disabled")
         self.stop_button.configure(state="normal")
         self.record_button.configure(state="disabled")
-        self.replay_speed_scale.configure(state="disabled")
         for entry in self.monitor_setting_entries:
             entry.configure(state="disabled")
         self.sessions_path_entry.configure(state="disabled")
@@ -2020,7 +2097,6 @@ class RobloxRecoveryApp:
         self,
         stop_event: threading.Event,
         shortcut: str,
-        replay_speed: float,
         open_timeout: int,
         post_open_wait: int,
     ) -> None:
@@ -2041,7 +2117,7 @@ class RobloxRecoveryApp:
                 elif not running:
                     self._post("status", "Roblox closed; attempting relaunch")
                     success, reason = self._relaunch(
-                        stop_event, shortcut, replay_speed, open_timeout, post_open_wait
+                        stop_event, shortcut, open_timeout, post_open_wait
                     )
                     if stop_event.is_set():
                         break
@@ -2072,7 +2148,6 @@ class RobloxRecoveryApp:
         self,
         stop_event: threading.Event,
         shortcut: str,
-        replay_speed: float,
         open_timeout: int,
         post_open_wait: int,
     ) -> tuple[bool, str]:
@@ -2120,7 +2195,7 @@ class RobloxRecoveryApp:
                 continue
 
             try:
-                self._replay_actions(stop_event, replay_speed)
+                self._replay_actions(stop_event)
             except (OSError, RuntimeError, ValueError) as error:
                 failures.append(f"Attempt {attempt}: recorded actions could not be replayed ({error}).")
                 continue
@@ -2131,7 +2206,7 @@ class RobloxRecoveryApp:
                 "Roblox Player was detected and remained open through the "
                 f"{post_open_wait}-second wait. Replayed {move_count} "
                 f"mouse path point(s), {click_count} click(s), and "
-                f"{scroll_count} scroll event(s) at {replay_speed:.2f}x speed. "
+                f"{scroll_count} scroll event(s) using the recorded timing. "
                 "The game launch itself was not verified."
             )
             return True, reason
@@ -2143,16 +2218,8 @@ class RobloxRecoveryApp:
         )
 
     def _replay_actions(
-        self, stop_event: threading.Event, replay_speed: float
+        self, stop_event: threading.Event
     ) -> None:
-        if (
-            not isinstance(replay_speed, (int, float))
-            or not MIN_REPLAY_SPEED <= replay_speed <= MAX_REPLAY_SPEED
-        ):
-            raise ValueError(
-                f"replay speed must be between {MIN_REPLAY_SPEED:.2f}x "
-                f"and {MAX_REPLAY_SPEED:.2f}x."
-            )
         hwnd = None
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline and not stop_event.is_set():
@@ -2168,7 +2235,9 @@ class RobloxRecoveryApp:
             raise RuntimeError("Roblox could not be brought to the foreground before replay.")
         focused_hwnd = hwnd
 
-        for action in self.macro:
+        replay_started_at = time.monotonic()
+        scheduled_at = replay_started_at
+        for index, action in enumerate(self.macro):
             if stop_event.is_set():
                 raise RuntimeError("monitoring was stopped during action replay.")
             if not isinstance(action, dict):
@@ -2176,15 +2245,30 @@ class RobloxRecoveryApp:
             delay = action.get("delay", 0)
             if not isinstance(delay, (int, float)) or delay < 0:
                 raise ValueError("the saved recording contains an invalid action delay.")
-            if stop_event.wait(min(delay, MAX_RECORDED_DELAY_SECONDS) / replay_speed):
+            if index:
+                scheduled_at += min(delay, MAX_RECORDED_DELAY_SECONDS)
+            remaining = scheduled_at - time.monotonic()
+            if remaining > 0 and stop_event.wait(remaining):
                 raise RuntimeError("monitoring was stopped during action replay.")
 
-            hwnd = find_roblox_window()
-            if not hwnd:
-                raise RuntimeError("the Roblox window disappeared during action replay.")
+            if not user32.IsWindow(focused_hwnd):
+                hwnd = find_roblox_window()
+                if not hwnd:
+                    raise RuntimeError("The Roblox window disappeared during action replay.")
+                focused_hwnd = hwnd
+            else:
+                hwnd = focused_hwnd
+            if user32.GetForegroundWindow() != hwnd:
+                if not self._focus_roblox_window(hwnd):
+                    raise RuntimeError(
+                        "Roblox could not be brought to the foreground; "
+                        "remaining actions were not sent."
+                    )
+            if user32.GetForegroundWindow() != hwnd:
+                raise RuntimeError("Roblox lost focus; remaining actions were not sent.")
             rect = client_screen_rect(hwnd)
             if not rect:
-                raise RuntimeError("the Roblox window has no usable client area.")
+                raise RuntimeError("The Roblox window has no usable client area.")
             x_ratio = action.get("x")
             y_ratio = action.get("y")
             if (
@@ -2197,15 +2281,6 @@ class RobloxRecoveryApp:
             left, top, width, height = rect
             x = left + int(x_ratio * width)
             y = top + int(y_ratio * height)
-            if hwnd != focused_hwnd or user32.GetForegroundWindow() != hwnd:
-                if not self._focus_roblox_window(hwnd):
-                    raise RuntimeError(
-                        "Roblox could not be brought to the foreground; "
-                        "remaining actions were not sent."
-                    )
-                focused_hwnd = hwnd
-            if user32.GetForegroundWindow() != focused_hwnd:
-                raise RuntimeError("Roblox lost focus; remaining actions were not sent.")
             self._send_mouse_input(
                 MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
                 x=x,
@@ -2315,6 +2390,14 @@ class RobloxRecoveryApp:
                 break
             if kind == "status":
                 self.status.set(str(data))
+            elif kind == "hotkey":
+                if not self.hotkey_capture:
+                    self._toggle_recording()
+            elif kind == "hotkey_error":
+                messagebox.showerror(
+                    APP_NAME,
+                    f"The global recorder shortcut stopped working:\n\n{data}",
+                )
             elif kind == "result":
                 self._add_history(data)
             elif kind == "stopped":
@@ -2323,7 +2406,6 @@ class RobloxRecoveryApp:
                 self.start_button.configure(state="normal")
                 self.stop_button.configure(state="disabled")
                 self.record_button.configure(state="normal")
-                self.replay_speed_scale.configure(state="normal")
                 for entry in self.monitor_setting_entries:
                     entry.configure(state="normal")
                 self.sessions_path_entry.configure(state="normal")
@@ -2678,6 +2760,15 @@ class RobloxRecoveryApp:
                 self.recorder.stop()
             except OSError as error:
                 messagebox.showerror(APP_NAME, f"Could not stop the recorder.\n\n{error}")
+        if self.global_hotkey:
+            try:
+                self.global_hotkey.stop()
+            except (OSError, RuntimeError) as error:
+                messagebox.showerror(
+                    APP_NAME,
+                    f"Could not stop the global recorder shortcut.\n\n{error}",
+                )
+            self.global_hotkey = None
         self._save_settings()
         if self.stop_event:
             self.stop_event.set()
