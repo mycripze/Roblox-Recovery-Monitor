@@ -42,7 +42,7 @@ experience is selected. The recording is saved locally in
 The pointer follows the recorded path and timing instead of jumping to each
 click. Use the **Mouse glide speed** slider to scale delays: `1.00x` is recorded
 pace, values above it are faster, and values below it are slower. The range is
-`0.25x` to `10.00x`.
+`0.25x` to `50.00x`.
 
 ## Monitoring settings and history
 
