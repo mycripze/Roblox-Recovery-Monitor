@@ -444,15 +444,20 @@ class RobloxRecoveryApp:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title(APP_NAME)
-        self.root.geometry("1100x780")
-        self.root.minsize(900, 650)
+        self.root.geometry("1100x900")
+        self.root.minsize(900, 800)
         self.folder = app_data_dir()
         self.settings_path = self.folder / "settings.json"
         self.macro_path = self.folder / "actions.json"
         self.history_path = self.folder / "history.json"
+        self.monitoring_sessions_path = self.folder / "monitoring_sessions.json"
         self.messages: queue.Queue[tuple[str, object]] = queue.Queue()
         self.stop_event: threading.Event | None = None
         self.worker: threading.Thread | None = None
+        self.monitoring_sessions: list[dict] = []
+        self.monitor_session_started_at: datetime | None = None
+        self.monitor_session_started_monotonic: float | None = None
+        self.stopwatch_after: str | None = None
         self.shortcut = tk.StringVar(value=find_default_shortcut())
         self.history_path_var = tk.StringVar(value=str(self.history_path))
         self.replay_speed = tk.DoubleVar(value=DEFAULT_REPLAY_SPEED)
@@ -464,6 +469,7 @@ class RobloxRecoveryApp:
         self.hotkey_key = "r"
         self.hotkey_capture = False
         self.status = tk.StringVar(value="Not monitoring")
+        self.stopwatch_text = tk.StringVar(value="Elapsed: 00:00:00")
         self.record_status = tk.StringVar(value="No action recording")
         self.macro: list[dict] = []
         self.history: list[dict] = []
@@ -481,6 +487,7 @@ class RobloxRecoveryApp:
         self._build_ui()
         self._update_record_label()
         self._load_history()
+        self._load_monitoring_sessions()
         self.root.protocol("WM_DELETE_WINDOW", self._close)
         self.root.after(100, self._process_messages)
         self.root.after(50, self._poll_hotkey)
@@ -617,6 +624,32 @@ class RobloxRecoveryApp:
             font=("Segoe UI", 10),
         )
         style.configure(
+            "Treeview",
+            background=self.colors["field"],
+            fieldbackground=self.colors["field"],
+            foreground=self.colors["foreground"],
+            bordercolor=self.colors["border"],
+            rowheight=26,
+            font=("Segoe UI", 9),
+        )
+        style.map(
+            "Treeview",
+            background=[("selected", self.colors["selected"])],
+            foreground=[("selected", self.colors["foreground"])],
+        )
+        style.configure(
+            "Treeview.Heading",
+            background=self.colors["surface"],
+            foreground=self.colors["muted"],
+            bordercolor=self.colors["border"],
+            padding=(8, 6),
+            font=("Segoe UI", 9, "bold"),
+        )
+        style.map(
+            "Treeview.Heading",
+            background=[("active", self.colors["hover"])],
+        )
+        style.configure(
             "Vertical.TScrollbar",
             background=self.colors["surface"],
             troughcolor=self.colors["background"],
@@ -675,6 +708,12 @@ class RobloxRecoveryApp:
         ttk.Label(
             controls, textvariable=self.status, style="Card.TLabel"
         ).pack(side="left", padx=(18, 0))
+        ttk.Label(
+            controls,
+            textvariable=self.stopwatch_text,
+            style="Card.TLabel",
+            font=("Segoe UI", 10, "bold"),
+        ).pack(side="left", padx=(14, 0))
         ttk.Label(
             controls, textvariable=self.record_status, style="CardMuted.TLabel"
         ).pack(side="right")
@@ -759,6 +798,43 @@ class RobloxRecoveryApp:
             style="CardMuted.TLabel",
         ).pack(side="left")
         self._show_hotkey_in_entry()
+
+        sessions_frame = ttk.Frame(outer, style="Card.TFrame", padding=14)
+        sessions_frame.pack(fill="x", pady=(0, 10))
+        sessions_header = ttk.Frame(sessions_frame, style="Card.TFrame")
+        sessions_header.pack(fill="x", pady=(0, 8))
+        ttk.Label(
+            sessions_header, text="Monitoring Sessions", style="Section.TLabel"
+        ).pack(side="left")
+        ttk.Label(
+            sessions_header,
+            text="A record is added when monitoring stops.",
+            style="CardMuted.TLabel",
+        ).pack(side="left", padx=(10, 0))
+        session_columns = ("date", "started", "ended", "elapsed")
+        self.sessions_table = ttk.Treeview(
+            sessions_frame,
+            columns=session_columns,
+            show="headings",
+            height=3,
+        )
+        for column, heading, width in (
+            ("date", "Date", 130),
+            ("started", "Time started", 150),
+            ("ended", "Time ended", 150),
+            ("elapsed", "Elapsed Time", 150),
+        ):
+            self.sessions_table.heading(column, text=heading)
+            self.sessions_table.column(
+                column, width=width, minwidth=80, anchor="w", stretch=True
+            )
+        session_scrollbar = ttk.Scrollbar(
+            sessions_frame, orient="vertical", command=self.sessions_table.yview
+        )
+        self.sessions_table.configure(yscrollcommand=session_scrollbar.set)
+        self.sessions_table.pack(side="left", fill="x", expand=True)
+        session_scrollbar.pack(side="right", fill="y")
+        self._render_monitoring_sessions()
 
         history_frame = ttk.Frame(outer, style="Card.TFrame", padding=14)
         self.history_panel = history_frame
@@ -1335,7 +1411,19 @@ class RobloxRecoveryApp:
             args=(self.stop_event, str(shortcut), replay_speed, open_timeout, post_open_wait),
             daemon=True,
         )
-        self.worker.start()
+        try:
+            self.worker.start()
+        except RuntimeError as error:
+            self.worker = None
+            self.stop_event = None
+            messagebox.showerror(
+                APP_NAME, f"Could not start monitoring.\n\n{error}"
+            )
+            return
+        self.monitor_session_started_at = datetime.now()
+        self.monitor_session_started_monotonic = time.monotonic()
+        self.stopwatch_text.set("Elapsed: 00:00:00")
+        self._update_stopwatch()
         self.start_button.configure(state="disabled")
         self.stop_button.configure(state="normal")
         self.record_button.configure(state="disabled")
@@ -1656,6 +1744,7 @@ class RobloxRecoveryApp:
                 self._add_history(data)
             elif kind == "stopped":
                 self.status.set(str(data))
+                self._finish_monitoring_session()
                 self.start_button.configure(state="normal")
                 self.stop_button.configure(state="disabled")
                 self.record_button.configure(state="normal")
@@ -1692,6 +1781,104 @@ class RobloxRecoveryApp:
                 APP_NAME,
                 f"The result is visible, but its history could not be saved to:\n"
                 f"{self.history_path}\n\n{error}",
+            )
+
+    @staticmethod
+    def _format_elapsed_time(seconds: float) -> str:
+        elapsed = max(0, int(seconds))
+        hours, remainder = divmod(elapsed, 3600)
+        minutes, seconds_part = divmod(remainder, 60)
+        return f"{hours:02d}:{minutes:02d}:{seconds_part:02d}"
+
+    def _update_stopwatch(self) -> None:
+        started = self.monitor_session_started_monotonic
+        if started is None:
+            self.stopwatch_text.set("Elapsed: 00:00:00")
+            self.stopwatch_after = None
+            return
+        self.stopwatch_text.set(
+            f"Elapsed: {self._format_elapsed_time(time.monotonic() - started)}"
+        )
+        self.stopwatch_after = self.root.after(250, self._update_stopwatch)
+
+    def _finish_monitoring_session(self) -> None:
+        started_at = self.monitor_session_started_at
+        started_monotonic = self.monitor_session_started_monotonic
+        if started_at is None or started_monotonic is None:
+            return
+        if self.stopwatch_after is not None:
+            self.root.after_cancel(self.stopwatch_after)
+            self.stopwatch_after = None
+        ended_at = datetime.now()
+        elapsed_seconds = max(0, int(time.monotonic() - started_monotonic))
+        entry = {
+            "date": started_at.strftime("%Y/%m/%d"),
+            "time_started": started_at.strftime("%H:%M:%S"),
+            "time_ended": ended_at.strftime("%H:%M:%S"),
+            "elapsed_time": self._format_elapsed_time(elapsed_seconds),
+            "elapsed_seconds": elapsed_seconds,
+            "started_at": started_at.isoformat(timespec="seconds"),
+            "ended_at": ended_at.isoformat(timespec="seconds"),
+        }
+        self.monitor_session_started_at = None
+        self.monitor_session_started_monotonic = None
+        self.stopwatch_text.set("Elapsed: 00:00:00")
+        self.monitoring_sessions.insert(0, entry)
+        self._render_monitoring_sessions()
+        try:
+            write_json(self.monitoring_sessions_path, self.monitoring_sessions)
+        except OSError as error:
+            messagebox.showerror(
+                APP_NAME,
+                "The monitoring session is visible, but could not be saved to:\n"
+                f"{self.monitoring_sessions_path}\n\n{error}",
+            )
+
+    def _load_monitoring_sessions(self) -> None:
+        if not self.monitoring_sessions_path.exists():
+            return
+        try:
+            data = json.loads(
+                self.monitoring_sessions_path.read_text(encoding="utf-8")
+            )
+            if not isinstance(data, list):
+                raise ValueError("The monitoring sessions file must contain a JSON list.")
+            required_fields = (
+                "date",
+                "time_started",
+                "time_ended",
+                "elapsed_time",
+            )
+            if any(
+                not isinstance(entry, dict)
+                or any(not isinstance(entry.get(field), str) for field in required_fields)
+                for entry in data
+            ):
+                raise ValueError("The monitoring sessions file contains an invalid entry.")
+            self.monitoring_sessions = data
+            self._render_monitoring_sessions()
+        except (OSError, json.JSONDecodeError, ValueError) as error:
+            messagebox.showwarning(
+                APP_NAME,
+                "Monitoring sessions could not be loaded from:\n"
+                f"{self.monitoring_sessions_path}\n\n{error}",
+            )
+
+    def _render_monitoring_sessions(self) -> None:
+        if not hasattr(self, "sessions_table"):
+            return
+        for item in self.sessions_table.get_children():
+            self.sessions_table.delete(item)
+        for entry in self.monitoring_sessions:
+            self.sessions_table.insert(
+                "",
+                "end",
+                values=(
+                    entry.get("date", ""),
+                    entry.get("time_started", ""),
+                    entry.get("time_ended", ""),
+                    entry.get("elapsed_time", ""),
+                ),
             )
 
     def _render_history(self) -> None:
@@ -1840,6 +2027,7 @@ class RobloxRecoveryApp:
         self._save_settings()
         if self.stop_event:
             self.stop_event.set()
+        self._finish_monitoring_session()
         self.root.destroy()
 
 

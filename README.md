@@ -56,6 +56,12 @@ before reopening it. If Roblox is closed when monitoring starts, it waits until
 it opens and then monitors for a later closure. Click **Stop monitoring** before
 intentionally closing Roblox.
 
+The live elapsed-time stopwatch starts with each monitoring run. When monitoring
+stops, the app records a separate session containing the date, start time, end
+time, and elapsed time. Session data is saved locally in
+`%LOCALAPPDATA%\RobloxRecoveryMonitor\monitoring_sessions.json` and displayed
+above the relaunch history.
+
 History entries show the full reason text and wrap to fit the resized window.
 Use **Browse** or edit **Save location** to choose the history JSON file. Use
 **Clear history** to remove entries from all time, the last hour, 24 hours, 7
