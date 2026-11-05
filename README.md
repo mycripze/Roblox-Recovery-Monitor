@@ -28,6 +28,9 @@ light mode. Your choice is saved with the other local settings.
 The app credits its creator at the bottom of the window, with a link to
 [mycripze's GitHub profile](https://github.com/mycripze).
 
+Use the vertical scrollbar or mouse wheel to scroll through the full interface
+and reach the relaunch history near the bottom.
+
 Use **Browse** beside the Roblox Player shortcut field to select its `.lnk` or
 `.exe` file if it is not found automatically.
 
@@ -77,7 +80,8 @@ location** field or **Browse** button to choose a different JSON file, and
 days, or 30 days.
 
 History entries show the full reason text and wrap to fit the resized window.
-By default, the history file is
+On startup, the app loads entries from the configured **Save location** and
+displays them in **Relaunch History**. By default, the history file is
 `%LOCALAPPDATA%\RobloxRecoveryMonitor\Logs\Relaunch History\history.json`.
 Use **Browse** or edit **Save location** to choose another history JSON file.
 Use **Clear history** to remove entries from all time, the last hour, 24 hours,

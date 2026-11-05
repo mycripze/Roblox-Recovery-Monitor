@@ -551,7 +551,7 @@ class RobloxRecoveryApp:
         self.root = root
         self.root.title(APP_NAME)
         self.root.geometry("1100x900")
-        self.root.minsize(900, 800)
+        self.root.minsize(900, 600)
         self.folder = app_data_dir()
         self.logs_folder = self.folder / "Logs"
         self.history_folder = self.logs_folder / "Relaunch History"
@@ -1121,6 +1121,8 @@ class RobloxRecoveryApp:
             bordercolor=self.colors["border"],
             arrowcolor=self.colors["foreground"],
         )
+        if hasattr(self, "main_canvas"):
+            self.main_canvas.configure(background=self.colors["background"])
         if hasattr(self, "theme_button"):
             self.theme_button.configure(
                 text=f"Switch to {'light' if self.theme == 'dark' else 'dark'} mode"
@@ -1142,8 +1144,56 @@ class RobloxRecoveryApp:
                 self.log.tag_configure(tag, foreground=color)
 
     def _build_ui(self) -> None:
-        outer = ttk.Frame(self.root, padding=(24, 20, 24, 44))
-        outer.pack(fill="both", expand=True)
+        footer = ttk.Frame(self.root)
+        footer.pack(side="bottom", fill="x", padx=24, pady=(0, 10))
+        self.creator_link = ttk.Label(
+            footer,
+            text="@mycripze on GitHub",
+            style="Link.TLabel",
+            cursor="hand2",
+        )
+        self.creator_link.pack(side="right")
+        self.creator_link.bind("<Button-1>", self._open_creator_profile)
+        ttk.Label(footer, text="Created by", style="Muted.TLabel").pack(
+            side="right", padx=(0, 5)
+        )
+
+        content = ttk.Frame(self.root)
+        content.pack(fill="both", expand=True)
+        self.main_canvas = tk.Canvas(
+            content,
+            background=self.colors["background"],
+            borderwidth=0,
+            highlightthickness=0,
+        )
+        main_scrollbar = ttk.Scrollbar(
+            content,
+            orient="vertical",
+            command=self.main_canvas.yview,
+            style="Vertical.TScrollbar",
+        )
+        self.main_canvas.configure(yscrollcommand=main_scrollbar.set)
+        main_scrollbar.pack(side="right", fill="y")
+        self.main_canvas.pack(side="left", fill="both", expand=True)
+        outer = ttk.Frame(self.main_canvas, padding=(24, 20, 24, 20))
+        outer_window = self.main_canvas.create_window(
+            (0, 0), window=outer, anchor="nw"
+        )
+        outer.bind(
+            "<Configure>",
+            lambda _event: self.main_canvas.configure(
+                scrollregion=self.main_canvas.bbox("all")
+            ),
+        )
+        self.main_canvas.bind(
+            "<Configure>",
+            lambda event: self.main_canvas.itemconfigure(
+                outer_window, width=event.width
+            ),
+        )
+        self.root.bind_all("<MouseWheel>", self._scroll_main_canvas, add="+")
+        self.root.bind_all("<Button-4>", self._scroll_main_canvas, add="+")
+        self.root.bind_all("<Button-5>", self._scroll_main_canvas, add="+")
 
         header = ttk.Frame(outer)
         header.pack(fill="x", pady=(0, 16))
@@ -1361,7 +1411,7 @@ class RobloxRecoveryApp:
 
         history_frame = ttk.Frame(outer, style="Card.TFrame", padding=14)
         self.history_panel = history_frame
-        history_frame.pack(fill="both", expand=True)
+        history_frame.pack(fill="both", expand=True, pady=(0, 10))
         history_header = ttk.Frame(history_frame, style="Card.TFrame")
         history_header.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 10))
         ttk.Label(
@@ -1387,7 +1437,9 @@ class RobloxRecoveryApp:
         ).pack(side="left")
 
         self.history_body = ttk.Frame(history_frame, style="Card.TFrame")
-        self.history_body.place(x=14, y=90, width=100, height=100)
+        self.history_body.grid(
+            row=2, column=0, columnspan=2, sticky="nsew"
+        )
         self.log = tk.Text(
             self.history_body,
             width=1,
@@ -1424,26 +1476,28 @@ class RobloxRecoveryApp:
         )
         self.log.tag_configure("REASON", foreground=self.colors["muted"])
         self.log.tag_configure("EMPTY", foreground=self.colors["muted"])
-        self.log.place(relx=0, rely=0, relwidth=1, relheight=1, width=-18)
-        history_scrollbar.place(relx=1, rely=0, relheight=1, anchor="ne")
+        self.log.pack(side="left", fill="both", expand=True)
+        history_scrollbar.pack(side="right", fill="y")
+        history_frame.rowconfigure(2, weight=1)
         history_frame.columnconfigure(0, weight=1)
-        history_frame.bind("<Configure>", self._layout_history_body)
-        history_frame.after_idle(self._layout_history_body)
         self._render_history()
 
-        footer = ttk.Frame(self.root)
-        footer.place(relx=1, rely=1, anchor="se", x=-24, y=-10)
-        self.creator_link = ttk.Label(
-            footer,
-            text="@mycripze on GitHub",
-            style="Link.TLabel",
-            cursor="hand2",
-        )
-        self.creator_link.pack(side="right")
-        self.creator_link.bind("<Button-1>", self._open_creator_profile)
-        ttk.Label(footer, text="Created by", style="Muted.TLabel").pack(
-            side="right", padx=(0, 5)
-        )
+    def _scroll_main_canvas(self, event):
+        widget = self.root.winfo_containing(event.x_root, event.y_root)
+        if widget in (self.log, self.sessions_table):
+            return
+        if event.num == 4:
+            units = -1
+        elif event.num == 5:
+            units = 1
+        elif event.delta:
+            units = -int(event.delta / 120)
+            if units == 0:
+                units = -1 if event.delta > 0 else 1
+        else:
+            return
+        self.main_canvas.yview_scroll(units, "units")
+        return "break"
 
     def _open_creator_profile(self, _event=None) -> None:
         try:
@@ -2555,21 +2609,6 @@ class RobloxRecoveryApp:
                 self._insert_history_row(entry)
         self.log.configure(state="disabled")
         self.log.yview_moveto(0)
-
-    def _layout_history_body(self, _event=None) -> None:
-        if not hasattr(self, "history_body"):
-            return
-        top = (
-            self.history_location.winfo_y()
-            + self.history_location.winfo_height()
-            + 10
-        )
-        self.history_body.place_configure(
-            x=14,
-            y=top,
-            width=max(1, self.history_panel.winfo_width() - 28),
-            height=max(1, self.history_panel.winfo_height() - top - 14),
-        )
 
     @staticmethod
     def _history_entry_datetime(entry: dict) -> datetime | None:
